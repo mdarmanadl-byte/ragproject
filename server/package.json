@@ -1,0 +1,50 @@
+{
+    "name": "server",
+    "version": "1.0.0",
+    "private": true,
+    "dependencies": {
+        "@google/genai": "^1.42.0",
+        "@langchain/community": "^1.1.17",
+        "@langchain/core": "^1.1.27",
+        "@langchain/google-genai": "^2.1.20",
+        "@langchain/pinecone": "^1.0.1",
+        "@langchain/textsplitters": "^1.0.1",
+        "@pinecone-database/pinecone": "^5.1.1",
+        "bcryptjs": "^3.0.3",
+        "cors": "^2.8.6",
+        "dotenv": "^17.3.1",
+        "express": "^5.2.1",
+        "helmet": "^8.1.0",
+        "jsonwebtoken": "^9.0.3",
+        "langchain": "^1.2.26",
+        "morgan": "^1.10.1",
+        "multer": "^2.0.2",
+        "pdf-parse-fork": "^1.2.0",
+        "readline-sync": "^1.4.10"
+    },
+    "devDependencies": {
+        "@types/bcryptjs": "^2.4.6",
+        "@types/cors": "^2.8.19",
+        "@types/express": "^5.0.6",
+        "@types/jsonwebtoken": "^9.0.10",
+        "@types/morgan": "^1.9.10",
+        "@types/multer": "^2.0.0",
+        "@types/node": "^25.3.0",
+        "nodemon": "^3.1.14",
+        "ts-node-dev": "^2.0.0",
+        "tsx": "^4.21.0",
+        "typescript": "^5.9.3"
+    },
+    "description": "",
+    "main": "dist/app.js",
+    "scripts": {
+        "test": "echo \"Error: no test specified\" && exit 1",
+        "dev": "tsx watch src/app.ts",
+        "start": "node dist/app.js",
+        "build": "tsc -p tsconfig.json"
+    },
+    "keywords": [],
+    "author": "",
+    "license": "ISC",
+    "type": "module"
+}
