@@ -1,4 +1,4 @@
-import "./config.ts";
+import "./config.js";
 
 import cors from "cors";
 import express, { Request, Response } from "express";
