@@ -1,150 +1,116 @@
-import { GoogleGenAI } from "@google/genai";
+import { HuggingFaceInferenceEmbeddings } from "@langchain/community/embeddings/hf";
 import { Pinecone } from "@pinecone-database/pinecone";
-import env from "dotenv";
 import { Request, Response } from "express";
+import Groq from "groq-sdk";
+import type { ChatCompletionMessageParam } from "groq-sdk/resources/chat/completions";
 
-env.config();
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const pinecone = new Pinecone({ apiKey: process.env.PINECONE_API_KEY as string });
+const pineconeIndex = pinecone.Index(process.env.PINECONE_INDEX_NAME as string);
+const embeddings = new HuggingFaceInferenceEmbeddings({
+  apiKey: process.env.HUGGINGFACE_API_KEY,
+  model: "sentence-transformers/all-MiniLM-L6-v2",
+});
 
-const googleApiKey = process.env.GOOGLE_API_KEY ?? process.env.GEMINI_API_KEY;
-if (!googleApiKey) {
-  throw new Error("Missing required env: GOOGLE_API_KEY (or GEMINI_API_KEY)");
-}
+export const sessions = new Map<string, ChatCompletionMessageParam[]>();
 
-const pineconeApiKey = process.env.PINECONE_API_KEY;
-const pineconeIndexName = process.env.PINECONE_INDEX_NAME;
-if (!pineconeApiKey || !pineconeIndexName) {
-  throw new Error("Missing required env: PINECONE_API_KEY or PINECONE_INDEX_NAME");
-}
-
-const ai = new GoogleGenAI({ apiKey: googleApiKey });
-const pinecone = new Pinecone({ apiKey: pineconeApiKey });
-
-const CHAT_MODEL = process.env.GEMINI_CHAT_MODEL || "gemini-2.0-flash";
-const EMBEDDING_MODEL = process.env.GEMINI_EMBEDDING_MODEL || "gemini-embedding-001";
-const EMBEDDING_OUTPUT_DIMENSION = Number.parseInt(
-  process.env.EMBEDDING_OUTPUT_DIMENSION || "768",
-  10
-);
-
-const parseRetryAfterSeconds = (message: string): number | undefined => {
-  const retryInMatch = message.match(/retry in\s+([\d.]+)s/i);
-  if (retryInMatch?.[1]) {
-    return Math.max(1, Math.ceil(Number.parseFloat(retryInMatch[1])));
-  }
-
-  const retryDelayMatch = message.match(/"retryDelay":"(\d+)s"/i);
-  if (retryDelayMatch?.[1]) {
-    return Number.parseInt(retryDelayMatch[1], 10);
-  }
-
-  return undefined;
-};
-
-const isQuotaError = (message: string): boolean => {
-  const lower = message.toLowerCase();
-  return (
-    message.includes("429") ||
-    lower.includes("resource_exhausted") ||
-    lower.includes("quota") ||
-    lower.includes("rate limit")
-  );
-};
+const getParamValue = (value: string | string[] | undefined): string | undefined =>
+  Array.isArray(value) ? value[0] : value;
 
 export const chatController = async (req: Request, res: Response): Promise<void> => {
   try {
-    const question = String(req.body?.question ?? "").trim();
-    const documentId =
-      typeof req.body?.documentId === "string" && req.body.documentId.trim()
-        ? req.body.documentId.trim()
-        : undefined;
+    const question = typeof req.body?.question === "string" ? req.body.question : undefined;
+    const documentId = typeof req.body?.documentId === "string" ? req.body.documentId : undefined;
 
-    if (!question) {
-      res.status(400).json({ error: "Question is required" });
+    if (!question || !documentId) {
+      res.status(400).json({ error: "question and documentId are required" });
       return;
     }
 
-    const embedResponse = await ai.models.embedContent({
-      model: EMBEDDING_MODEL,
-      contents: question,
-      config: {
-        outputDimensionality: EMBEDDING_OUTPUT_DIMENSION,
-      },
+    if (!sessions.has(documentId)) {
+      sessions.set(documentId, []);
+    }
+    const history = sessions.get(documentId)!;
+
+    const questionVector = await embeddings.embedQuery(question);
+    const results = await pineconeIndex.query({
+      topK: 5,
+      vector: questionVector,
+      includeMetadata: true,
+      filter: { documentId: { $eq: documentId } },
     });
 
-    const queryVector = embedResponse.embeddings?.[0]?.values;
-    if (!queryVector?.length) {
-      res.status(500).json({ error: "Failed to generate query embedding" });
-      return;
-    }
-
-    const indexBase = pinecone.Index(pineconeIndexName);
-    const namespace = process.env.PINECONE_NAMESPACE;
-    const index = namespace ? indexBase.namespace(namespace) : indexBase;
-
-    const searchResults = await index.query({
-      topK: 5,
-      vector: queryVector,
-      includeMetadata: true,
-      ...(documentId ? ({ filter: { documentId: { $eq: documentId } } } as const) : {}),
-    } as any);
-
-    const context = (searchResults.matches ?? [])
-      .map((match) => String(match.metadata?.text ?? ""))
-      .filter(Boolean)
+    const context = results.matches
+      .map((match) => match.metadata?.text)
       .join("\n\n---\n\n");
 
-    if (!context) {
-      res.status(200).json({
-        success: true,
-        answer: "I could not find the answer in the provided document.",
-        sources: [],
-      });
-      return;
-    }
+    history.push({ role: "user", content: question });
 
-    const prompt = `You have to behave like a Data Structure and Algorithm Expert.
-You will be given a context of relevant information and a user question.
-Answer the user's question based ONLY on the context.
-If the answer is not in the context, say exactly: "I could not find the answer in the provided document."
-Keep answers clear and concise.
-
-Question: ${question}
-
-Context:
-${context}`;
-
-    const response = await ai.models.generateContent({
-      model: CHAT_MODEL,
-      contents: prompt,
+    const response = await groq.chat.completions.create({
+      model: "llama-3.3-70b-versatile",
+      messages: [
+        {
+          role: "system",
+          content: `You are a helpful expert. Answer based ONLY on the context below.
+          If answer is not in context, say "I could not find the answer in the document."
+          Context: ${context}`,
+        },
+        ...history,
+      ],
     });
 
-    res.json({
-      success: true,
-      answer: response.text ?? "I could not find the answer in the provided document.",
-      sources: (searchResults.matches ?? []).map((m) => ({
-        id: m.id,
-        score: m.score,
-        text: String(m.metadata?.text ?? ""),
-      })),
-    });
+    const answer = response.choices[0].message.content ?? "No response generated.";
+    history.push({ role: "assistant", content: answer });
+
+    const sources = results.matches.map((match) => ({
+      id: match.id,
+      score: match.score,
+      text: match.metadata?.text as string,
+      documentId: match.metadata?.documentId as string,
+      fileName: match.metadata?.source as string,
+    }));
+
+    res.json({ success: true, answer, sources });
+
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const error = err as Error;
+    res.status(500).json({ error: error.message });
+  }
+};
 
-    if (isQuotaError(message)) {
-      const retryAfterSeconds = parseRetryAfterSeconds(message);
-      if (typeof retryAfterSeconds === "number") {
-        res.setHeader("Retry-After", retryAfterSeconds.toString());
-      }
-      res.status(429).json({
-        error: retryAfterSeconds
-          ? `Chat quota exceeded. Retry after ${retryAfterSeconds}s.`
-          : "Chat quota exceeded. Please retry shortly.",
-        code: "CHAT_QUOTA_EXCEEDED",
-        retryAfterSeconds,
-      });
+// ✅ Delete session history + Pinecone data
+export const deleteSessionController = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const documentId = getParamValue(req.params.documentId);
+
+    if (!documentId) {
+      res.status(400).json({ error: "documentId is required" });
       return;
     }
 
-    res.status(500).json({ error: message });
+    // Delete from memory
+    sessions.delete(documentId);
+    console.log(`Session deleted for documentId: ${documentId}`);
+
+    // Delete from Pinecone
+    await pineconeIndex.deleteMany({ documentId: { $eq: documentId } });
+    console.log(`Pinecone data deleted for documentId: ${documentId}`);
+
+    res.json({ success: true, message: "Session and Pinecone data deleted" });
+
+  } catch (err) {
+    const error = err as Error;
+    res.status(500).json({ error: error.message });
   }
+};
+
+// ✅ Check if session exists
+export const checkSessionController = async (req: Request, res: Response): Promise<void> => {
+  const documentId = getParamValue(req.params.documentId);
+  if (!documentId) {
+    res.status(400).json({ error: "documentId is required" });
+    return;
+  }
+  const exists = sessions.has(documentId);
+  res.json({ exists });
 };
